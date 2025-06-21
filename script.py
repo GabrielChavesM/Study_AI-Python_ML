@@ -8,7 +8,8 @@ from dotenv import load_dotenv
 import speech_recognition as sr
 import threading
 import pyttsx3
-from PIL import Image
+import queue
+import multiprocessing
 
 # Remove conteúdo entre <think></think>
 def remover_think(texto):
@@ -18,25 +19,97 @@ def remover_think(texto):
 load_dotenv()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
-# Inicializar motor TTS
-tts_engine = pyttsx3.init()
-tts_engine.setProperty('rate', 150)
-tts_engine.setProperty('volume', 1.0)
+import platform
+
+# Verifica se o sistema requer fallback
+def safe_tts_engine():
+    try:
+        engine = pyttsx3.init()
+        engine.setProperty('rate', 150)
+        engine.setProperty('volume', 1.0)
+
+        # Seleciona voz compatível com pt
+        for voice in engine.getProperty('voices'):
+            if 'portugal' in voice.name.lower() or 'brazil' in voice.name.lower():
+                engine.setProperty('voice', voice.id)
+                break
+        return engine
+    except Exception as e:
+        print(f"[ERRO ao inicializar TTS]: {e}")
+        return None
+
+# Inicializar apenas uma vez
+tts_engine = safe_tts_engine()
+tts_queue = queue.Queue()
+
+def executar_tts():
+    while True:
+        try:
+            texto = tts_queue.get(block=True)
+            if not texto.strip():
+                continue
+
+            if tts_engine:
+                tts_engine.say(texto)
+                tts_engine.runAndWait()
+
+        except Exception as e:
+            print(f"[ERRO TTS] {e}")
+
+# Variável global para controlar o processo TTS atual
+tts_current_process = None
+tts_lock = threading.Lock()
+
+def tts_process(texto_para_ler):
+    try:
+        engine = pyttsx3.init()
+        engine.setProperty('rate', 150)
+        engine.setProperty('volume', 1.0)
+
+        for voice in engine.getProperty('voices'):
+            if 'portugal' in voice.name.lower() or 'brazil' in voice.name.lower():
+                engine.setProperty('voice', voice.id)
+                break
+
+        engine.say(texto_para_ler)
+        engine.runAndWait()
+    except Exception as e:
+        print(f"[ERRO TTS subprocesso] {e}")
+
+def tts_check_queue():
+    global tts_current_process
+    global tts_queue_list
+
+    if tts_current_process is not None:
+        if tts_current_process.is_alive():
+            # Processo ainda rodando, espera terminar
+            return
+        else:
+            # Processo terminou
+            tts_current_process.join()
+            tts_current_process = None
+
+    if tts_queue_list:
+        texto = tts_queue_list.pop(0)
+        tts_current_process = multiprocessing.Process(target=tts_process, args=(texto,), daemon=True)
+        tts_current_process.start()
 
 def ler_texto(texto):
+    global tts_current_process
     if hasattr(app, 'modo_mudo') and app.modo_mudo:
-        return  # Não falar se estiver em modo mudo
+        return
 
-    def tts_thread():
-        voices = tts_engine.getProperty('voices')
-        for voice in voices:
-            if 'portugal' in voice.name.lower() or 'brazil' in voice.name.lower():
-                tts_engine.setProperty('voice', voice.id)
-                break
-        tts_engine.say(texto)
-        tts_engine.runAndWait()
+    with tts_lock:
+        # Se já estiver lendo algo, interrompe
+        if tts_current_process is not None and tts_current_process.is_alive():
+            tts_current_process.terminate()
+            tts_current_process.join()
+            tts_current_process = None
 
-    threading.Thread(target=tts_thread, daemon=True).start()
+        # Inicia nova leitura
+        tts_current_process = multiprocessing.Process(target=tts_process, args=(texto,), daemon=True)
+        tts_current_process.start()
+
 
 # Diretórios
 PROMPTS_DIR = "prompts"
@@ -134,9 +207,11 @@ class App(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.title("StudyAI")
-        self.geometry("720x700")  # Ajustei altura para espaço da barra de progresso
+        self.geometry("720x700")
         self.resizable(False, False)
         self.modo_mudo = False
+        self.dark_mode = True  # Inicialmente no modo escuro
+        self.tts_falando = False  # Flag para controlar se TTS está falando
 
         self.protocol("WM_DELETE_WINDOW", self.sair)
 
@@ -161,16 +236,30 @@ class App(ctk.CTk):
         self.create_widgets()
         self.config_states(iniciar=True)
 
+    def bloquear_digitar(self, event):
+        return "break"
+
+    def alternar_modo(self):
+        self.dark_mode = not self.dark_mode
+        ctk.set_appearance_mode("dark" if self.dark_mode else "light")
+        self.btn_modo.configure(text="🌙 Dark Mode" if self.dark_mode else "☀️ Light Mode")
+
+    def alternar_mudo(self):
+        self.modo_mudo = not self.modo_mudo
+        self.btn_mudo.configure(text="🔇 Som Desligado" if self.modo_mudo else "🔊 Som Ligado")
+
     def create_widgets(self):
         ctk.CTkLabel(self, text="Escolha a matéria:").pack(pady=(10, 0))
         self.combo_prompt = ctk.CTkComboBox(self, values=self.prompts, width=600)
         self.combo_prompt.pack(pady=(0, 10))
         self.combo_prompt.set(self.prompts[0])
+        self.combo_prompt.bind("<Key>", self.bloquear_digitar)
 
         ctk.CTkLabel(self, text="Escolha a dificuldade:").pack(pady=(0, 0))
         self.combo_dificuldade = ctk.CTkComboBox(self, values=self.dificuldades, width=600)
         self.combo_dificuldade.pack(pady=(0, 10))
         self.combo_dificuldade.set(self.dificuldades[1])
+        self.combo_dificuldade.bind("<Key>", self.bloquear_digitar)
 
         self.btn_iniciar = ctk.CTkButton(self, text="Iniciar Quiz", command=self.iniciar_quiz)
         self.btn_iniciar.pack(pady=(0, 15))
@@ -178,7 +267,6 @@ class App(ctk.CTk):
         self.text_chat = ctk.CTkTextbox(self, width=680, height=300, state="disabled", wrap="word")
         self.text_chat.pack(pady=10)
 
-        # Barra de progresso e label de feedback
         self.progress = ctk.CTkProgressBar(self, width=680)
         self.progress.set(0.0)
         self.progress.pack(pady=(5, 2))
@@ -193,7 +281,7 @@ class App(ctk.CTk):
         self.entry_resposta.pack(side="left", padx=(0, 5), fill="x", expand=True)
         self.entry_resposta.bind("<Return>", lambda event: self.enviar_resposta())
 
-        self.btn_enviar = ctk.CTkButton(frame_resposta, text="Enviar Resposta", command=self.enviar_resposta)
+        self.btn_enviar = ctk.CTkButton(frame_resposta, text="Enviar", command=self.enviar_resposta)
         self.btn_enviar.pack(side="right")
 
         frame_botoes = ctk.CTkFrame(self, fg_color="transparent")
@@ -202,15 +290,14 @@ class App(ctk.CTk):
         self.btn_mudo = ctk.CTkButton(frame_botoes, text="🔊 Som Ligado", command=self.alternar_mudo)
         self.btn_mudo.pack(side="left", padx=(0, 10))
 
+        self.btn_modo = ctk.CTkButton(frame_botoes, text="🌙 Dark Mode", command=self.alternar_modo)  # Botão para alternar modo
+        self.btn_modo.pack(side="left", padx=(0, 10))
+
         self.btn_sair = ctk.CTkButton(frame_botoes, text="Sair", fg_color="red", command=self.sair)
         self.btn_sair.pack(side="left")
 
         self.status_label = ctk.CTkLabel(self, text="")
         self.status_label.pack(pady=(0, 10))
-
-    def alternar_mudo(self):
-        self.modo_mudo = not self.modo_mudo
-        self.btn_mudo.configure(text="🔇 Mudo" if self.modo_mudo else "🔊 Som Ligado")
 
     def config_states(self, iniciar=False, quiz_ativo=False):
         self.combo_prompt.configure(state="normal" if iniciar else "disabled")
@@ -289,6 +376,7 @@ class App(ctk.CTk):
                 self.atualizar_chat(texto_exibir, "assistant")
                 self.status_label.configure(text="")
 
+                # Ler a pergunta e as alternativas automaticamente
                 texto_para_voz = f"Pergunta {self.perguntas_respondidas + 1}. {pergunta}. "
                 for letra in ['A', 'B', 'C', 'D']:
                     texto_para_voz += f"Opção {letra}: {alternativas.get(letra, '')}. "
@@ -306,6 +394,11 @@ class App(ctk.CTk):
         self.text_chat.configure(state="disabled")
 
     def enviar_resposta(self):
+        # Se estiver bloqueado, não faz nada
+        if hasattr(self, 'aguardando_proxima') and self.aguardando_proxima:
+            messagebox.showinfo("Aguarde", "Aguarde o fim da leitura antes de enviar outra resposta.")
+            return
+
         resposta_usuario = self.entry_resposta.get().strip().upper()
         if resposta_usuario not in ['A', 'B', 'C', 'D']:
             messagebox.showwarning("Resposta inválida", "Digite A, B, C ou D para responder.")
@@ -323,20 +416,35 @@ class App(ctk.CTk):
 
         self.atualizar_chat(texto_feedback, "assistant")
 
-        # Falar a explicação
-        ler_texto(texto_feedback)
+        # Ler a explicação e a resposta correta automaticamente
+        texto_para_voz = f"{'Acertou!' if correta else 'Errou.'} Resposta correta: {self.resposta_correta_atual}. Explicação: {self.explicacao_atual}."
+        ler_texto(texto_para_voz)
 
-        self.perguntas_respondidas += 1
-        aproveitamento = int((self.acertos / self.perguntas_respondidas) * 100)
+        # Bloqueia novas respostas por 15 segundos para o TTS ler
+        self.aguardando_proxima = True
+        self.entry_resposta.configure(state="disabled")
+        self.btn_enviar.configure(state="disabled")
 
-        # Atualiza barra de progresso e label aproveitamento
-        self.progress.set(self.perguntas_respondidas / 8)
-        self.label_aproveitamento.configure(text=f"Você está com {aproveitamento}% de aproveitamento até agora")
+        def permitir_proxima():
+            self.perguntas_respondidas += 1
+            aproveitamento = int((self.acertos / self.perguntas_respondidas) * 100)
 
-        if self.perguntas_respondidas >= 8:
-            self.finalizar_quiz()
-        else:
-            self.gerar_pergunta_async()
+            # Atualiza barra de progresso e label aproveitamento
+            self.progress.set(self.perguntas_respondidas / 8)
+            self.label_aproveitamento.configure(text=f"Você está com {aproveitamento}% de aproveitamento até agora")
+
+            if self.perguntas_respondidas >= 8:
+                self.finalizar_quiz()
+            else:
+                self.gerar_pergunta_async()
+
+            # Libera o bloqueio para nova resposta
+            self.aguardando_proxima = False
+            self.entry_resposta.configure(state="normal")
+            self.btn_enviar.configure(state="normal")
+
+        # Chama liberar após 10s
+        self.after(10000, permitir_proxima)
 
     def finalizar_quiz(self):
         texto_final = f"Quiz finalizado! Você acertou {self.acertos} de 8 perguntas. Aproveitamento: {int((self.acertos / 8)*100)}%."
@@ -370,5 +478,6 @@ class App(ctk.CTk):
 
 
 if __name__ == "__main__":
+    multiprocessing.freeze_support()
     app = App()
     app.mainloop()

@@ -1,0 +1,6 @@
+customtkinter
+groq
+python-dotenv
+speechrecognition
+pyttsx3
+Pillow
