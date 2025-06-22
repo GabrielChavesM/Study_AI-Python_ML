@@ -232,6 +232,8 @@ class App(ctk.CTk):
         self.resposta_correta_atual = None
         self.explicacao_atual = None
         self.perguntas_geradas = set()
+        self.erros = []  # Lista para armazenar perguntas erradas
+        self.acertadas = []  # Lista para armazenar perguntas acertadas
 
         self.create_widgets()
         self.config_states(iniciar=True)
@@ -247,6 +249,12 @@ class App(ctk.CTk):
     def alternar_mudo(self):
         self.modo_mudo = not self.modo_mudo
         self.btn_mudo.configure(text="🔇 Som Desligado" if self.modo_mudo else "🔊 Som Ligado")
+
+    def atualizar_aproveitamento(self):
+        if self.perguntas_respondidas > 0:
+            aproveitamento = int((self.acertos / self.perguntas_respondidas) * 100)
+            self.label_aproveitamento.configure(text=f"Você está com {aproveitamento}% de aproveitamento até agora")
+            self.progress.set(self.perguntas_respondidas / 8)
 
     def create_widgets(self):
         ctk.CTkLabel(self, text="Escolha a matéria:").pack(pady=(10, 0))
@@ -290,7 +298,7 @@ class App(ctk.CTk):
         self.btn_mudo = ctk.CTkButton(frame_botoes, text="🔊 Som Ligado", command=self.alternar_mudo)
         self.btn_mudo.pack(side="left", padx=(0, 10))
 
-        self.btn_modo = ctk.CTkButton(frame_botoes, text="🌙 Dark Mode", command=self.alternar_modo)  # Botão para alternar modo
+        self.btn_modo = ctk.CTkButton(frame_botoes, text="🌙 Dark Mode", command=self.alternar_modo)
         self.btn_modo.pack(side="left", padx=(0, 10))
 
         self.btn_sair = ctk.CTkButton(frame_botoes, text="Sair", fg_color="red", command=self.sair)
@@ -314,6 +322,9 @@ class App(ctk.CTk):
 
         self.perguntas_respondidas = 0
         self.acertos = 0
+        self.erros = []
+        self.acertadas = []
+        self.perguntas_geradas = set()
         self.perguntas_geradas.clear()
         self.entry_resposta.delete(0, "end")
 
@@ -339,6 +350,9 @@ class App(ctk.CTk):
             self.status_label.configure(text="")
             return
 
+        # Bloqueia a entrada de respostas enquanto a pergunta está sendo gerada
+        self.entry_resposta.configure(state="disabled")
+        self.btn_enviar.configure(state="disabled")
         self.status_label.configure(text="A gerar pergunta, aguarde...")
 
         def worker():
@@ -349,7 +363,8 @@ class App(ctk.CTk):
                               f"A) [opção A]\nB) [opção B]\nC) [opção C]\nD) [opção D]\n\n"
                               f"**Resposta correta:** [A|B|C|D]\n"
                               f"**Explicação:** [texto explicativo]\n\n"
-                              f"Importante: Apenas texto simples, sem formatação matemática ou Markdown, evite usar \( \)")
+                              f"Importante: Apenas texto simples, sem formatação matemática ou Markdown, evite usar \( \) "
+                              f"e não repita perguntas já feitas neste quiz.")
 
             resposta_ia = obter_resposta_groq(pergunta_texto, self.prompt_path, self.historico_path)
             pergunta, alternativas, resposta_correta, explicacao = parse_pergunta(resposta_ia)
@@ -358,11 +373,16 @@ class App(ctk.CTk):
                 self.after(100, lambda: self.gerar_pergunta_async(tentativas + 1))
                 return
 
-            if pergunta in self.perguntas_geradas:
-                self.after(100, lambda: self.gerar_pergunta_async(tentativas + 1))
-                return
-            else:
-                self.perguntas_geradas.add(pergunta)
+            # Verifica se a pergunta já foi feita neste quiz
+            pergunta_simplificada = re.sub(r'[^a-zA-Z0-9]', '', pergunta.lower())
+            for pergunta_existente in self.perguntas_geradas:
+                existente_simplificada = re.sub(r'[^a-zA-Z0-9]', '', pergunta_existente.lower())
+                if pergunta_simplificada in existente_simplificada or existente_simplificada in pergunta_simplificada:
+                    self.after(100, lambda: self.gerar_pergunta_async(tentativas + 1))
+                    return
+
+            # Se chegou aqui, é uma pergunta nova
+            self.perguntas_geradas.add(pergunta)
 
             def update_ui():
                 self.pergunta_atual = pergunta
@@ -382,6 +402,10 @@ class App(ctk.CTk):
                     texto_para_voz += f"Opção {letra}: {alternativas.get(letra, '')}. "
                 ler_texto(texto_para_voz)
 
+                # Libera a entrada de respostas após a pergunta ser exibida
+                self.entry_resposta.configure(state="normal")
+                self.btn_enviar.configure(state="normal")
+
             self.after(0, update_ui)
 
         threading.Thread(target=worker, daemon=True).start()
@@ -396,7 +420,7 @@ class App(ctk.CTk):
     def enviar_resposta(self):
         # Se estiver bloqueado, não faz nada
         if hasattr(self, 'aguardando_proxima') and self.aguardando_proxima:
-            messagebox.showinfo("Aguarde", "Aguarde o fim da leitura antes de enviar outra resposta.")
+            messagebox.showinfo("Aguarde", "Aguarde o fim da correção antes de enviar outra resposta.")
             return
 
         resposta_usuario = self.entry_resposta.get().strip().upper()
@@ -410,6 +434,23 @@ class App(ctk.CTk):
         correta = (resposta_usuario == self.resposta_correta_atual)
         if correta:
             self.acertos += 1
+            self.acertadas.append({
+                "pergunta": self.pergunta_atual,
+                "explicacao": self.explicacao_atual
+            })
+        else:
+            self.erros.append({
+                "pergunta": self.pergunta_atual,
+                "resposta_usuario": resposta_usuario,
+                "resposta_correta": self.resposta_correta_atual,
+                "explicacao": self.explicacao_atual
+            })
+
+        # Atualiza o número de perguntas respondidas imediatamente
+        self.perguntas_respondidas += 1
+        
+        # Atualiza o aproveitamento agora
+        self.atualizar_aproveitamento()
 
         texto_correcao = f"Resposta correta: {self.resposta_correta_atual}\nExplicação: {self.explicacao_atual}"
         texto_feedback = f"{'Acertou!' if correta else 'Errou.'} {texto_correcao}"
@@ -420,37 +461,93 @@ class App(ctk.CTk):
         texto_para_voz = f"{'Acertou!' if correta else 'Errou.'} Resposta correta: {self.resposta_correta_atual}. Explicação: {self.explicacao_atual}."
         ler_texto(texto_para_voz)
 
-        # Bloqueia novas respostas por 15 segundos para o TTS ler
+        # Calcula o tempo necessário para o TTS com base no número de palavras
+        palavras = len(texto_para_voz.split())
+        tempo_tts = int(palavras * 0.6 * 1000)  # Converte para milissegundos
+
+        # Bloqueia novas respostas pelo tempo calculado
         self.aguardando_proxima = True
         self.entry_resposta.configure(state="disabled")
         self.btn_enviar.configure(state="disabled")
 
         def permitir_proxima():
-            self.perguntas_respondidas += 1
-            aproveitamento = int((self.acertos / self.perguntas_respondidas) * 100)
-
-            # Atualiza barra de progresso e label aproveitamento
-            self.progress.set(self.perguntas_respondidas / 8)
-            self.label_aproveitamento.configure(text=f"Você está com {aproveitamento}% de aproveitamento até agora")
+            # Libera o bloqueio para nova resposta
+            self.aguardando_proxima = False
+            self.entry_resposta.configure(state="normal")
+            self.btn_enviar.configure(state="normal")
 
             if self.perguntas_respondidas >= 8:
                 self.finalizar_quiz()
             else:
                 self.gerar_pergunta_async()
 
-            # Libera o bloqueio para nova resposta
-            self.aguardando_proxima = False
-            self.entry_resposta.configure(state="normal")
-            self.btn_enviar.configure(state="normal")
+        # Chama liberar após o tempo calculado
+        self.after(tempo_tts, permitir_proxima)
 
-        # Chama liberar após 10s
-        self.after(10000, permitir_proxima)
+    def gerar_feedback_final(self):
+        # Prepara o contexto para a IA gerar um feedback personalizado
+        contexto_feedback = (
+            f"O aluno respondeu a um quiz sobre {self.prompt_nome.replace('_', ' ')} com dificuldade {self.dificuldade}. "
+            f"Acertou {self.acertos} de 8 perguntas. Aqui está uma análise detalhada:\n\n"
+            f"Perguntas erradas:\n"
+        )
+        
+        for i, erro in enumerate(self.erros, 1):
+            contexto_feedback += (
+                f"{i}. Pergunta: {erro['pergunta']}\n"
+                f"   Resposta do aluno: {erro['resposta_usuario']}\n"
+                f"   Resposta correta: {erro['resposta_correta']}\n"
+                f"   Explicação: {erro['explicacao']}\n\n"
+            )
+        
+        contexto_feedback += "\nPerguntas acertadas:\n"
+        for i, acerto in enumerate(self.acertadas, 1):
+            contexto_feedback += (
+                f"{i}. Pergunta: {acerto['pergunta']}\n"
+                f"   Explicação: {acerto['explicacao']}\n\n"
+            )
+        
+        contexto_feedback += (
+            "\n Não use formatação Markdown, não use asteriscos para negrito, apenas texto simples. Evite usar \( \) e não repita perguntas já feitas neste quiz."
+            "\nPor favor, forneça um feedback formatado da seguinte maneira:\n"
+            "1. Análise Geral do Desempenho:\n"
+            "\n Não use formatação Markdown, não use asteriscos para negrito, apenas texto simples. Evite usar \( \) e não repita perguntas já feitas neste quiz."
+            "   [Uma frase curta]\n\n"
+            "2. Principais Temas que Precisa Reforçar:\n"
+            "\n Não use formatação Markdown, não use asteriscos para negrito, apenas texto simples. Evite usar \( \) e não repita perguntas já feitas neste quiz."
+            "   - [Enumere os temas e o que melhorar]\n\n"
+            "3. Sugestões Específicas de Estudo:\n"
+            "\n Não use formatação Markdown, não use asteriscos para negrito, apenas texto simples. Evite usar \( \) e não repita perguntas já feitas neste quiz."
+            "   - [Indique matérias boas para melhorar os temas a reforçar]\n\n"
+            "4. Reconhecimento dos Pontos Fortes:\n"
+            "\n Não use formatação Markdown, não use asteriscos para negrito, apenas texto simples. Evite usar \( \) e não repita perguntas já feitas neste quiz."
+            "   - [Destaque os pontos fortes que podem precisar de menos estudo]\n\n"
+            "5. Frase Motivacional:\n"
+            "\n Não use formatação Markdown, não use asteriscos para negrito, apenas texto simples. Evite usar \( \) e não repita perguntas já feitas neste quiz."
+            "   [Uma frase motivacional para encorajar o aluno]\n"
+            "\nUse uma linguagem amigável e encorajadora, como se fosse um professor que quer ajudar o aluno a melhorar."
+            "\n Não use formatação Markdown, apenas texto simples. Evite usar \( \) e não repita perguntas já feitas neste quiz."
+        )
+        
+        return obter_resposta_groq(contexto_feedback, self.prompt_path, self.historico_path)
 
     def finalizar_quiz(self):
+        # Primeiro mostra o resumo básico
         texto_final = f"Quiz finalizado! Você acertou {self.acertos} de 8 perguntas. Aproveitamento: {int((self.acertos / 8)*100)}%."
         self.atualizar_chat(texto_final, "assistant")
         ler_texto(texto_final)
-        self.config_states(iniciar=True, quiz_ativo=False)
+        
+        # Agora gera e mostra o feedback detalhado
+        self.status_label.configure(text="Gerando feedback personalizado...")
+        
+        def gerar_e_exibir_feedback():
+            feedback = self.gerar_feedback_final()
+            self.after(0, lambda: self.atualizar_chat(feedback, "assistant"))
+            self.after(0, lambda: ler_texto(feedback))
+            self.after(0, lambda: self.status_label.configure(text=""))
+            self.after(0, lambda: self.config_states(iniciar=True, quiz_ativo=False))
+        
+        threading.Thread(target=gerar_e_exibir_feedback, daemon=True).start()
 
     def sair(self):
         if messagebox.askyesno("Sair", "Deseja realmente sair?"):
