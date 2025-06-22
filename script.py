@@ -2,7 +2,7 @@ import os
 import json
 import re
 import customtkinter as ctk
-from tkinter import messagebox
+from tkinter import messagebox, Listbox
 from groq import Groq
 from dotenv import load_dotenv
 import speech_recognition as sr
@@ -10,8 +10,9 @@ import threading
 import pyttsx3
 import queue
 import multiprocessing
+from datetime import datetime
 
-# Remove conteúdo entre <think></think>
+# Remove conteúdo entre <think></think> das perguntas
 def remover_think(texto):
     return re.sub(r'<think>.*?</think>', '', texto, flags=re.DOTALL).strip()
 
@@ -22,15 +23,19 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 import platform
 
 # Verifica se o sistema requer fallback
-def safe_tts_engine():
+def safe_tts_engine(self):
     try:
         engine = pyttsx3.init()
         engine.setProperty('rate', 150)
         engine.setProperty('volume', 1.0)
 
-        # Seleciona voz compatível com pt
+        # Seleciona voz compatível com o idioma escolhido
+        idioma = self.lingua
         for voice in engine.getProperty('voices'):
-            if 'portugal' in voice.name.lower() or 'brazil' in voice.name.lower():
+            if idioma == "Português" and ('portugal' in voice.name.lower() or 'brazil' in voice.name.lower()):
+                engine.setProperty('voice', voice.id)
+                break
+            elif idioma == "Inglês" and 'english' in voice.name.lower():
                 engine.setProperty('voice', voice.id)
                 break
         return engine
@@ -39,7 +44,7 @@ def safe_tts_engine():
         return None
 
 # Inicializar apenas uma vez
-tts_engine = safe_tts_engine()
+tts_engine = None
 tts_queue = queue.Queue()
 
 def executar_tts():
@@ -82,7 +87,6 @@ def tts_check_queue():
 
     if tts_current_process is not None:
         if tts_current_process.is_alive():
-            # Processo ainda rodando, espera terminar
             return
         else:
             # Processo terminou
@@ -100,7 +104,7 @@ def ler_texto(texto):
         return
 
     with tts_lock:
-        # Se já estiver lendo algo, interrompe
+        # Se já estiver a ler algo, interrompe
         if tts_current_process is not None and tts_current_process.is_alive():
             tts_current_process.terminate()
             tts_current_process.join()
@@ -114,8 +118,15 @@ def ler_texto(texto):
 # Diretórios
 PROMPTS_DIR = "prompts"
 HISTORICOS_DIR = "historicos"
+HISTORICOS_GERAIS_DIR = "historicos_gerais"
 os.makedirs(PROMPTS_DIR, exist_ok=True)
 os.makedirs(HISTORICOS_DIR, exist_ok=True)
+os.makedirs(HISTORICOS_GERAIS_DIR, exist_ok=True)
+
+if not os.path.exists(HISTORICOS_GERAIS_DIR):
+    print(f"Diretório '{HISTORICOS_GERAIS_DIR}' não existe.")
+else:
+    print(f"Arquivos no diretório '{HISTORICOS_GERAIS_DIR}': {os.listdir(HISTORICOS_GERAIS_DIR)}")
 
 def listar_prompts():
     return [os.path.splitext(f)[0] for f in os.listdir(PROMPTS_DIR) if f.endswith(".txt")]
@@ -207,11 +218,11 @@ class App(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.title("StudyAI")
-        self.geometry("720x700")
+        self.geometry("720x715")
         self.resizable(False, False)
         self.modo_mudo = False
         self.dark_mode = True  # Inicialmente no modo escuro
-        self.tts_falando = False  # Flag para controlar se TTS está falando
+        self.tts_falando = False  # Flag para controlar se TTS está a falar
 
         self.protocol("WM_DELETE_WINDOW", self.sair)
 
@@ -253,7 +264,7 @@ class App(ctk.CTk):
     def atualizar_aproveitamento(self):
         if self.perguntas_respondidas > 0:
             aproveitamento = int((self.acertos / self.perguntas_respondidas) * 100)
-            self.label_aproveitamento.configure(text=f"Você está com {aproveitamento}% de aproveitamento até agora")
+            self.label_aproveitamento.configure(text=f"Está com {aproveitamento}% de aproveitamento até agora")
             self.progress.set(self.perguntas_respondidas / 8)
 
     def create_widgets(self):
@@ -269,6 +280,12 @@ class App(ctk.CTk):
         self.combo_dificuldade.set(self.dificuldades[1])
         self.combo_dificuldade.bind("<Key>", self.bloquear_digitar)
 
+        ctk.CTkLabel(self, text="Escolha a língua:").pack(pady=(0, 0))
+        self.combo_lingua = ctk.CTkComboBox(self, values=["Português", "English"], width=600)
+        self.combo_lingua.pack(pady=(0, 10))
+        self.combo_lingua.set("Português")  # Língua padrão
+        self.combo_lingua.bind("<Key>", self.bloquear_digitar)
+
         self.btn_iniciar = ctk.CTkButton(self, text="Iniciar Quiz", command=self.iniciar_quiz)
         self.btn_iniciar.pack(pady=(0, 15))
 
@@ -279,7 +296,7 @@ class App(ctk.CTk):
         self.progress.set(0.0)
         self.progress.pack(pady=(5, 2))
 
-        self.label_aproveitamento = ctk.CTkLabel(self, text="Você está com 0% de aproveitamento até agora")
+        self.label_aproveitamento = ctk.CTkLabel(self, text="Está com 0% de aproveitamento até agora")
         self.label_aproveitamento.pack(pady=(0, 10))
 
         frame_resposta = ctk.CTkFrame(self)
@@ -295,14 +312,21 @@ class App(ctk.CTk):
         frame_botoes = ctk.CTkFrame(self, fg_color="transparent")
         frame_botoes.pack(pady=(5, 10))
 
-        self.btn_mudo = ctk.CTkButton(frame_botoes, text="🔊 Som Ligado", command=self.alternar_mudo)
+        # Botão de Som Ligado/Desligado
+        self.btn_mudo = ctk.CTkButton(frame_botoes, text="🔊 Som Ligado", command=self.alternar_mudo, width=150, height=50)
         self.btn_mudo.pack(side="left", padx=(0, 10))
 
-        self.btn_modo = ctk.CTkButton(frame_botoes, text="🌙 Dark Mode", command=self.alternar_modo)
+        # Botão de Dark/Light Mode
+        self.btn_modo = ctk.CTkButton(frame_botoes, text="🌙 Dark Mode", command=self.alternar_modo, width=150, height=50)
         self.btn_modo.pack(side="left", padx=(0, 10))
 
-        self.btn_sair = ctk.CTkButton(frame_botoes, text="Sair", fg_color="red", command=self.sair)
-        self.btn_sair.pack(side="left")
+        # Botão de Ver Histórico
+        self.btn_historico = ctk.CTkButton(frame_botoes, text="Ver Histórico", command=self.abrir_historico, width=150, height=50)
+        self.btn_historico.pack(side="left", padx=(0, 10))        
+
+        # Botão de Sair
+        self.btn_sair = ctk.CTkButton(frame_botoes, text="Sair", fg_color="red", command=self.sair, width=150, height=50)
+        self.btn_sair.pack(side="left", padx=(0, 10))
 
         self.status_label = ctk.CTkLabel(self, text="")
         self.status_label.pack(pady=(0, 10))
@@ -318,7 +342,8 @@ class App(ctk.CTk):
         self.prompt_nome = os.path.splitext(self.combo_prompt.get())[0]
         self.prompt_path = os.path.join(PROMPTS_DIR, self.combo_prompt.get())
         self.dificuldade = self.combo_dificuldade.get()
-        self.historico_path = os.path.join(HISTORICOS_DIR, f"{self.prompt_nome}_{self.dificuldade}.json")
+        self.lingua = self.combo_lingua.get()  # Salvar a língua escolhida
+        self.historico_path = os.path.join(HISTORICOS_DIR, f"{self.prompt_nome}_{self.dificuldade}_{self.lingua}.json")
 
         self.perguntas_respondidas = 0
         self.acertos = 0
@@ -332,13 +357,15 @@ class App(ctk.CTk):
             json.dump([], f, ensure_ascii=False, indent=2)
 
         self.text_chat.configure(state="normal")
-        self.text_chat.delete("1.0", "end")
-        self.text_chat.insert("end", f"Quiz iniciado!\nTema: {self.prompt_nome.replace('_', ' ')}\nDificuldade: {self.dificuldade}\nResponda 8 perguntas.\n\n")
+        idioma_texto = f"Quiz iniciado!\nTema: {self.prompt_nome.replace('_', ' ')}\nDificuldade: {self.dificuldade}\nResponda 8 perguntas.\n\n"
+        if self.lingua == "Inglês":
+            idioma_texto = f"Quiz started!\nTopic: {self.prompt_nome.replace('_', ' ')}\nDifficulty: {self.dificuldade}\nAnswer 8 questions.\n\n"
+        self.text_chat.insert("end", idioma_texto)
         self.text_chat.configure(state="disabled")
 
         # Reset barra e label aproveitamento
         self.progress.set(0.0)
-        self.label_aproveitamento.configure(text="Você está com 0% de aproveitamento até agora")
+        self.label_aproveitamento.configure(text="Está com 0% de aproveitamento até agora" if self.lingua == "Português" else "You currently have 0% accuracy.")
 
         self.config_states(iniciar=False, quiz_ativo=True)
         self.gerar_pergunta_async()
@@ -346,25 +373,28 @@ class App(ctk.CTk):
     def gerar_pergunta_async(self, tentativas=0):
         MAX_TENTATIVAS = 5
         if tentativas > MAX_TENTATIVAS:
-            self.atualizar_chat("Não foi possível gerar uma pergunta nova após várias tentativas. Tente reiniciar o quiz.", "assistant")
+            mensagem_erro = "Não foi possível gerar uma pergunta nova após várias tentativas. Tente reiniciar o quiz." if self.lingua == "Português" else "Failed to generate a new question after several attempts. Try restarting the quiz."
+            self.atualizar_chat(mensagem_erro, "assistant")
             self.status_label.configure(text="")
             return
 
-        # Bloqueia a entrada de respostas enquanto a pergunta está sendo gerada
+        # Bloqueia a entrada de respostas enquanto a pergunta está a ser gerada
         self.entry_resposta.configure(state="disabled")
         self.btn_enviar.configure(state="disabled")
-        self.status_label.configure(text="A gerar pergunta, aguarde...")
+        self.status_label.configure(text="A gerar pergunta, aguarde..." if self.lingua == "Português" else "Generating question, please wait...")
 
         def worker():
-            pergunta_texto = (f"Crie uma pergunta de múltipla escolha com 4 alternativas (A, B, C, D) sobre "
-                              f"'{self.prompt_nome.replace('_', ' ')}' de nível {self.dificuldade}. "
-                              f"Use este formato fixo:\n\n"
-                              f"**Pergunta:** [texto da pergunta em português, apenas com texto simples]\n"
-                              f"A) [opção A]\nB) [opção B]\nC) [opção C]\nD) [opção D]\n\n"
-                              f"**Resposta correta:** [A|B|C|D]\n"
-                              f"**Explicação:** [texto explicativo]\n\n"
-                              f"Importante: Apenas texto simples, sem formatação matemática ou Markdown, evite usar \( \) "
-                              f"e não repita perguntas já feitas neste quiz.")
+            pergunta_texto = (
+                f"Crie uma pergunta de múltipla escolha com 4 alternativas (A, B, C, D) sobre "
+                f"'{self.prompt_nome.replace('_', ' ')}' de nível {self.dificuldade}. "
+                f"Use este formato fixo:\n\n"
+                f"**Pergunta:** [texto da pergunta em {'português' if self.lingua == 'Português' else 'inglês'}, apenas com texto simples]\n"
+                f"A) [opção A]\nB) [opção B]\nC) [opção C]\nD) [opção D]\n\n"
+                f"**Resposta correta:** [A|B|C|D]\n"
+                f"**Explicação:** [texto explicativo]\n\n"
+                f"Importante: Apenas texto simples, sem formatação matemática ou Markdown, evite usar \( \) "
+                f"e não repita perguntas já feitas neste quiz."
+            )
 
             resposta_ia = obter_resposta_groq(pergunta_texto, self.prompt_path, self.historico_path)
             pergunta, alternativas, resposta_correta, explicacao = parse_pergunta(resposta_ia)
@@ -389,7 +419,7 @@ class App(ctk.CTk):
                 self.resposta_correta_atual = resposta_correta.upper()
                 self.explicacao_atual = explicacao
 
-                texto_exibir = f"Pergunta {self.perguntas_respondidas + 1}:\n{pergunta}\n"
+                texto_exibir = f"Pergunta {self.perguntas_respondidas + 1}:\n{pergunta}\n" if self.lingua == "Português" else f"Question {self.perguntas_respondidas + 1}:\n{pergunta}\n"
                 for letra in ['A', 'B', 'C', 'D']:
                     texto_exibir += f"{letra}) {alternativas.get(letra, '')}\n"
 
@@ -397,9 +427,9 @@ class App(ctk.CTk):
                 self.status_label.configure(text="")
 
                 # Ler a pergunta e as alternativas automaticamente
-                texto_para_voz = f"Pergunta {self.perguntas_respondidas + 1}. {pergunta}. "
+                texto_para_voz = f"Pergunta {self.perguntas_respondidas + 1}. {pergunta}. " if self.lingua == "Português" else f"Question {self.perguntas_respondidas + 1}. {pergunta}. "
                 for letra in ['A', 'B', 'C', 'D']:
-                    texto_para_voz += f"Opção {letra}: {alternativas.get(letra, '')}. "
+                    texto_para_voz += f"Opção {letra}: {alternativas.get(letra, '')}. " if self.lingua == "Português" else f"Option {letra}: {alternativas.get(letra, '')}. "
                 ler_texto(texto_para_voz)
 
                 # Libera a entrada de respostas após a pergunta ser exibida
@@ -463,7 +493,7 @@ class App(ctk.CTk):
 
         # Calcula o tempo necessário para o TTS com base no número de palavras
         palavras = len(texto_para_voz.split())
-        tempo_tts = int(palavras * 0.6 * 1000)  # Converte para milissegundos
+        tempo_tts = int(palavras * 0.75 * 1000)  # Converte para milissegundos
 
         # Bloqueia novas respostas pelo tempo calculado
         self.aguardando_proxima = True
@@ -531,48 +561,152 @@ class App(ctk.CTk):
         
         return obter_resposta_groq(contexto_feedback, self.prompt_path, self.historico_path)
 
+    def salvar_desempenho(self):
+        historico_desempenho_path = os.path.join(HISTORICOS_GERAIS_DIR, f"historico_desempenho_{self.prompt_nome}.json")
+        historico = carregar_historico_json(historico_desempenho_path)
+
+        def obter_tema_ia(explicacoes):
+            # Envia as explicações para a IA e solicita os temas
+            prompt_tema = (
+                "\n Não use formatação Markdown, apenas texto simples. Evite usar \( \) e não repita perguntas já feitas neste quiz."
+                "Identifique o tema principal de cada explicação abaixo e retorne uma lista de temas. "
+                "\n Não use formatação Markdown, apenas texto simples. Evite usar \( \) e não repita perguntas já feitas neste quiz."
+                "Os temas devem ser curtos e claros, como 'Adição', 'Subtração', 'Multiplicação', 'Divisão', etc.\n\n"
+                "\n Não use formatação Markdown, apenas texto simples. Evite usar \( \) e não repita perguntas já feitas neste quiz."
+                "Explicações:\n" + "\n".join([f"- {exp}" for exp in explicacoes])
+            )
+            resposta = obter_resposta_groq(prompt_tema, self.prompt_path, self.historico_path)
+            temas = [tema.strip() for tema in resposta.split("\n") if tema.strip()]
+            return temas
+
+        explicacoes_erradas = [erro["explicacao"] for erro in self.erros]
+        explicacoes_acertadas = [acerto["explicacao"] for acerto in self.acertadas]
+
+        temas_errados = obter_tema_ia(explicacoes_erradas)
+        temas_acertados = obter_tema_ia(explicacoes_acertadas)
+
+        novo_registro = {
+            "data": datetime.now().strftime("%Y-%m-%d"),  # Apenas a data, sem horas
+            "dificuldade": self.dificuldade,
+            "acertos": self.acertos,
+            "total_perguntas": 8,
+            "aproveitamento": int((self.acertos / 8) * 100),
+            "temas_errados": list(set(temas_errados)),  # Remover duplicatas
+            "temas_acertados": list(set(temas_acertados))  # Remover duplicatas
+        }
+
+        historico.append(novo_registro)
+
+        # Salvar histórico geral
+        with open(historico_desempenho_path, "w", encoding="utf-8") as file:
+            json.dump(historico, file, indent=2, ensure_ascii=False)
+
+        # Atualizar histórico geral consolidado
+        self.atualizar_historico_geral(historico_desempenho_path)
+
+    def atualizar_historico_geral(self, historico_desempenho_path):
+        historico = carregar_historico_json(historico_desempenho_path)
+
+        total_acertos = sum([registro["acertos"] for registro in historico])
+        total_perguntas = sum([registro["total_perguntas"] for registro in historico])
+        aproveitamento_geral = int((total_acertos / total_perguntas) * 100) if total_perguntas > 0 else 0
+
+        historico_geral_path = os.path.join(HISTORICOS_GERAIS_DIR, f"historico_geral_{self.prompt_nome}.txt")
+        with open(historico_geral_path, "w", encoding="utf-8") as file:
+            file.write(f"Histórico de Desempenho - {self.prompt_nome}\n\n")
+            for registro in historico:
+                file.write(
+                    f"Data: {registro['data']}\n"
+                    f"Dificuldade: {registro['dificuldade']}\n"
+                    f"Acertos: {registro['acertos']} de {registro['total_perguntas']}\n"
+                    f"Aproveitamento: {registro['aproveitamento']}%\n"
+                    f"Temas Errados: {', '.join(registro['temas_errados'])}\n"
+                    f"Temas Acertados: {', '.join(registro['temas_acertados'])}\n\n"
+                    "---------------------------\n\n"
+                )
+            file.write(f"Histórico geral:\n")
+            file.write(f"Acertos: {total_acertos} de {total_perguntas}\n")
+            file.write(f"Aproveitamento: {aproveitamento_geral}%\n")
+
+    def abrir_historico(self):
+        # Listar os arquivos de histórico disponíveis
+        historicos_disponiveis = [
+            f.replace("historico_geral_", "").replace(".txt", "")
+            for f in os.listdir(HISTORICOS_GERAIS_DIR)
+            if f.startswith("historico_geral_") and f.endswith(".txt")
+        ]
+
+        if not historicos_disponiveis:
+            messagebox.showinfo("Histórico de Desempenho", "Não há históricos registrados.")
+            return
+
+        # Criar janela para selecionar o histórico
+        janela_selecao = ctk.CTkToplevel(self)
+        janela_selecao.title("Selecionar Histórico")
+        janela_selecao.geometry("400x300")
+
+        ctk.CTkLabel(janela_selecao, text="Escolha o histórico para visualizar:").pack(pady=(10, 0))
+
+        # Usar Listbox para exibir os históricos disponíveis
+        lista_historicos = Listbox(janela_selecao, width=50, height=10)
+        lista_historicos.pack(pady=(10, 10))
+
+        for historico in historicos_disponiveis:
+            lista_historicos.insert("end", historico)
+
+        def abrir_historico_selecionado():
+            selecionado = lista_historicos.get(lista_historicos.curselection())
+            if not selecionado:
+                messagebox.showwarning("Aviso", "Nenhum histórico foi selecionado.")
+                return
+
+            historico_geral_path = os.path.join(HISTORICOS_GERAIS_DIR, f"historico_geral_{selecionado}.txt")
+
+            if not os.path.exists(historico_geral_path):
+                messagebox.showinfo("Histórico de Desempenho", f"Não há histórico registrado para a matéria '{selecionado}'.")
+                return
+
+            janela_historico = ctk.CTkToplevel(self)
+            janela_historico.title(f"Histórico de Desempenho - {selecionado}")
+            janela_historico.geometry("600x400")
+
+            text_historico = ctk.CTkTextbox(janela_historico, width=580, height=380, wrap="word")
+            text_historico.pack(pady=10)
+
+            with open(historico_geral_path, "r", encoding="utf-8") as file:
+                texto_exibir = file.read()
+
+            text_historico.insert("end", texto_exibir)
+            text_historico.configure(state="disabled")
+
+            janela_selecao.destroy()
+
+        btn_abrir = ctk.CTkButton(janela_selecao, text="Abrir Histórico", command=abrir_historico_selecionado)
+        btn_abrir.pack(pady=(10, 10))
+
     def finalizar_quiz(self):
         # Primeiro mostra o resumo básico
         texto_final = f"Quiz finalizado! Você acertou {self.acertos} de 8 perguntas. Aproveitamento: {int((self.acertos / 8)*100)}%."
         self.atualizar_chat(texto_final, "assistant")
         ler_texto(texto_final)
-        
-        # Agora gera e mostra o feedback detalhado
-        self.status_label.configure(text="Gerando feedback personalizado...")
-        
+
+        # Salva o desempenho no histórico
+        self.salvar_desempenho()
+
+        # mostrar o feedback detalhado
+        self.status_label.configure(text="A gerar feedback personalizado...")
         def gerar_e_exibir_feedback():
             feedback = self.gerar_feedback_final()
             self.after(0, lambda: self.atualizar_chat(feedback, "assistant"))
             self.after(0, lambda: ler_texto(feedback))
             self.after(0, lambda: self.status_label.configure(text=""))
             self.after(0, lambda: self.config_states(iniciar=True, quiz_ativo=False))
-        
         threading.Thread(target=gerar_e_exibir_feedback, daemon=True).start()
 
     def sair(self):
         if messagebox.askyesno("Sair", "Deseja realmente sair?"):
             apagar_todos_jsons()
             self.destroy()
-
-    def speech_to_text():
-        # Inicializar o reconhecedor
-        recognizer = sr.Recognizer()
-
-        # Usar o microfone como fonte de áudio
-        with sr.Microphone() as source:
-            print("Por favor, fale algo...")
-            try:
-                # Capturar o áudio
-                audio = recognizer.listen(source)
-                # Reconhecer a fala usando a API Google Web Speech (Português de Portugal)
-                text = recognizer.recognize_google(audio, language="pt-PT")
-                print("Você disse: " + text)
-                return text
-            except sr.UnknownValueError:
-                print("Desculpe, não consegui entender o que você disse.")
-            except sr.RequestError as e:
-                print(f"Erro ao se conectar ao serviço de reconhecimento de fala: {e}")
-
 
 if __name__ == "__main__":
     multiprocessing.freeze_support()
