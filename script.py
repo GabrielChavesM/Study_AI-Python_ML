@@ -218,7 +218,7 @@ class App(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.title("StudyAI")
-        self.geometry("720x715")
+        self.geometry("768x768")
         self.resizable(False, False)
         self.modo_mudo = False
         self.dark_mode = True  # Inicialmente no modo escuro
@@ -264,7 +264,9 @@ class App(ctk.CTk):
     def atualizar_aproveitamento(self):
         if self.perguntas_respondidas > 0:
             aproveitamento = int((self.acertos / self.perguntas_respondidas) * 100)
-            self.label_aproveitamento.configure(text=f"Está com {aproveitamento}% de aproveitamento até agora")
+            self.label_aproveitamento.configure(
+                text=f"Está com {aproveitamento}% de aproveitamento até agora" if self.lingua == "Português" else f"You currently have {aproveitamento}% accuracy."
+            )
             self.progress.set(self.perguntas_respondidas / 8)
 
     def create_widgets(self):
@@ -313,19 +315,19 @@ class App(ctk.CTk):
         frame_botoes.pack(pady=(5, 10))
 
         # Botão de Som Ligado/Desligado
-        self.btn_mudo = ctk.CTkButton(frame_botoes, text="🔊 Som Ligado", command=self.alternar_mudo, width=150, height=50)
+        self.btn_mudo = ctk.CTkButton(frame_botoes, text="🔊 Som Ligado", command=self.alternar_mudo, width=150, height=30)
         self.btn_mudo.pack(side="left", padx=(0, 10))
 
         # Botão de Dark/Light Mode
-        self.btn_modo = ctk.CTkButton(frame_botoes, text="🌙 Dark Mode", command=self.alternar_modo, width=150, height=50)
+        self.btn_modo = ctk.CTkButton(frame_botoes, text="🌙 Dark Mode", command=self.alternar_modo, width=150, height=30)
         self.btn_modo.pack(side="left", padx=(0, 10))
 
         # Botão de Ver Histórico
-        self.btn_historico = ctk.CTkButton(frame_botoes, text="Ver Histórico", command=self.abrir_historico, width=150, height=50)
+        self.btn_historico = ctk.CTkButton(frame_botoes, text="Ver Histórico", command=self.abrir_historico, width=150, height=30)
         self.btn_historico.pack(side="left", padx=(0, 10))        
 
         # Botão de Sair
-        self.btn_sair = ctk.CTkButton(frame_botoes, text="Sair", fg_color="red", command=self.sair, width=150, height=50)
+        self.btn_sair = ctk.CTkButton(frame_botoes, text="Sair", fg_color="red", command=self.sair, width=150, height=30)
         self.btn_sair.pack(side="left", padx=(0, 10))
 
         self.status_label = ctk.CTkLabel(self, text="")
@@ -378,7 +380,7 @@ class App(ctk.CTk):
             self.status_label.configure(text="")
             return
 
-        # Bloqueia a entrada de respostas enquanto a pergunta está a ser gerada
+        # Bloqueia a entrada de respostas enquanto a pergunta está sendo gerada
         self.entry_resposta.configure(state="disabled")
         self.btn_enviar.configure(state="disabled")
         self.status_label.configure(text="A gerar pergunta, aguarde..." if self.lingua == "Português" else "Generating question, please wait...")
@@ -388,7 +390,7 @@ class App(ctk.CTk):
                 f"Crie uma pergunta de múltipla escolha com 4 alternativas (A, B, C, D) sobre "
                 f"'{self.prompt_nome.replace('_', ' ')}' de nível {self.dificuldade}. "
                 f"Use este formato fixo:\n\n"
-                f"**Pergunta:** [texto da pergunta em {'português' if self.lingua == 'Português' else 'inglês'}, apenas com texto simples]\n"
+                f"**Pergunta:** [texto da pergunta em {'português' if self.lingua == "Português" else 'inglês'}, apenas com texto simples]\n"
                 f"A) [opção A]\nB) [opção B]\nC) [opção C]\nD) [opção D]\n\n"
                 f"**Resposta correta:** [A|B|C|D]\n"
                 f"**Explicação:** [texto explicativo]\n\n"
@@ -423,6 +425,7 @@ class App(ctk.CTk):
                 for letra in ['A', 'B', 'C', 'D']:
                     texto_exibir += f"{letra}) {alternativas.get(letra, '')}\n"
 
+                self.text_chat.configure(state="normal", font=("Arial", 14))  # Define a fonte e o tamanho
                 self.atualizar_chat(texto_exibir, "assistant")
                 self.status_label.configure(text="")
 
@@ -448,70 +451,45 @@ class App(ctk.CTk):
         self.text_chat.configure(state="disabled")
 
     def enviar_resposta(self):
-        # Se estiver bloqueado, não faz nada
-        if hasattr(self, 'aguardando_proxima') and self.aguardando_proxima:
-            messagebox.showinfo("Aguarde", "Aguarde o fim da correção antes de enviar outra resposta.")
-            return
-
         resposta_usuario = self.entry_resposta.get().strip().upper()
         if resposta_usuario not in ['A', 'B', 'C', 'D']:
-            messagebox.showwarning("Resposta inválida", "Digite A, B, C ou D para responder.")
+            messagebox.showwarning("Resposta inválida", "Digite A, B, C ou D para responder." if self.lingua == "Português" else "Enter A, B, C, or D to respond.")
             return
 
         self.entry_resposta.delete(0, "end")
         self.atualizar_chat(resposta_usuario, "user")
 
         correta = (resposta_usuario == self.resposta_correta_atual)
-        if correta:
-            self.acertos += 1
-            self.acertadas.append({
-                "pergunta": self.pergunta_atual,
-                "explicacao": self.explicacao_atual
-            })
-        else:
-            self.erros.append({
-                "pergunta": self.pergunta_atual,
-                "resposta_usuario": resposta_usuario,
-                "resposta_correta": self.resposta_correta_atual,
-                "explicacao": self.explicacao_atual
-            })
-
-        # Atualiza o número de perguntas respondidas imediatamente
-        self.perguntas_respondidas += 1
-        
-        # Atualiza o aproveitamento agora
-        self.atualizar_aproveitamento()
-
-        texto_correcao = f"Resposta correta: {self.resposta_correta_atual}\nExplicação: {self.explicacao_atual}"
-        texto_feedback = f"{'Acertou!' if correta else 'Errou.'} {texto_correcao}"
+        texto_correcao = f"Resposta correta: {self.resposta_correta_atual}\nExplicação: {self.explicacao_atual}" if self.lingua == "Português" else f"Correct answer: {self.resposta_correta_atual}\nExplanation: {self.explicacao_atual}"
+        texto_feedback = f"{'Acertou!' if correta else 'Errou.'} {texto_correcao}" if self.lingua == "Português" else f"{'Correct!' if correta else 'Wrong.'} {texto_correcao}"
 
         self.atualizar_chat(texto_feedback, "assistant")
+        ler_texto(texto_feedback)
 
-        # Ler a explicação e a resposta correta automaticamente
-        texto_para_voz = f"{'Acertou!' if correta else 'Errou.'} Resposta correta: {self.resposta_correta_atual}. Explicação: {self.explicacao_atual}."
-        ler_texto(texto_para_voz)
+        # Atualiza o número de perguntas respondidas
+        self.perguntas_respondidas += 1
+        if correta:
+            self.acertos += 1
+
+        # Atualiza o aproveitamento em tempo real
+        self.atualizar_aproveitamento()
 
         # Calcula o tempo necessário para o TTS com base no número de palavras
-        palavras = len(texto_para_voz.split())
-        tempo_tts = int(palavras * 0.75 * 1000)  # Converte para milissegundos
+        palavras = len(texto_feedback.split())
+        tempo_tts = int(palavras * 0.8 * 1000)  # Converte para milissegundos
 
         # Bloqueia novas respostas pelo tempo calculado
-        self.aguardando_proxima = True
         self.entry_resposta.configure(state="disabled")
         self.btn_enviar.configure(state="disabled")
 
         def permitir_proxima():
-            # Libera o bloqueio para nova resposta
-            self.aguardando_proxima = False
             self.entry_resposta.configure(state="normal")
             self.btn_enviar.configure(state="normal")
-
             if self.perguntas_respondidas >= 8:
                 self.finalizar_quiz()
             else:
                 self.gerar_pergunta_async()
 
-        # Chama liberar após o tempo calculado
         self.after(tempo_tts, permitir_proxima)
 
     def gerar_feedback_final(self):
@@ -560,7 +538,7 @@ class App(ctk.CTk):
         )
         
         return obter_resposta_groq(contexto_feedback, self.prompt_path, self.historico_path)
-
+    
     def salvar_desempenho(self):
         historico_desempenho_path = os.path.join(HISTORICOS_GERAIS_DIR, f"historico_desempenho_{self.prompt_nome}.json")
         historico = carregar_historico_json(historico_desempenho_path)
@@ -620,7 +598,7 @@ class App(ctk.CTk):
                     f"Dificuldade: {registro['dificuldade']}\n"
                     f"Acertos: {registro['acertos']} de {registro['total_perguntas']}\n"
                     f"Aproveitamento: {registro['aproveitamento']}%\n"
-                    f"Temas Errados: {', '.join(registro['temas_errados'])}\n"
+                    f"Temas a Estudar: {', '.join(registro['temas_errados'])}\n"
                     f"Temas Acertados: {', '.join(registro['temas_acertados'])}\n\n"
                     "---------------------------\n\n"
                 )
@@ -686,15 +664,15 @@ class App(ctk.CTk):
 
     def finalizar_quiz(self):
         # Primeiro mostra o resumo básico
-        texto_final = f"Quiz finalizado! Você acertou {self.acertos} de 8 perguntas. Aproveitamento: {int((self.acertos / 8)*100)}%."
+        texto_final = f"Quiz finished! You answered {self.acertos} out of 8 questions correctly. Accuracy: {int((self.acertos / 8) * 100)}%." if self.lingua == "Inglês" else f"Quiz finalizado! Você acertou {self.acertos} de 8 perguntas. Aproveitamento: {int((self.acertos / 8)*100)}%."
         self.atualizar_chat(texto_final, "assistant")
         ler_texto(texto_final)
 
         # Salva o desempenho no histórico
         self.salvar_desempenho()
 
-        # mostrar o feedback detalhado
-        self.status_label.configure(text="A gerar feedback personalizado...")
+        # Mostrar o feedback detalhado
+        self.status_label.configure(text="Generating personalized feedback..." if self.lingua == "Inglês" else "A gerar feedback personalizado...")
         def gerar_e_exibir_feedback():
             feedback = self.gerar_feedback_final()
             self.after(0, lambda: self.atualizar_chat(feedback, "assistant"))
